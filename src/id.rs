@@ -113,7 +113,7 @@ impl std::fmt::Debug for Id {
 /// An error which can be returned when parsing an id.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ParseIdError {
-    /// Returned when the id had length other than 20.
+    /// Returned when the input is not 12 raw bytes or 20 encoded bytes.
     #[error("invalid length {0}")]
     InvalidLength(usize),
     /// Returned when the id had character not in `[0-9a-v]`.
@@ -178,55 +178,114 @@ const fn gen_dec() -> [u8; 256] {
 mod tests {
     use super::*;
 
-    // https://github.com/rs/xid/blob/efa678f304ab65d6d57eedcb086798381ae22206/id_test.go#L101
+    // https://github.com/rs/xid/blob/34d39051ca0d70f40a8cd8c5491ef835e624b71d/id_test.go
     #[test]
-    fn test_to_string() {
-        assert_eq!(
-            Id([0x4d, 0x88, 0xe1, 0x5b, 0x60, 0xf4, 0x86, 0xe4, 0x28, 0x41, 0x2d, 0xc9])
-                .to_string(),
-            "9m4e2mr0ui3e8a215n4g"
-        );
-    }
-
-    // https://github.com/rs/xid/blob/efa678f304ab65d6d57eedcb086798381ae22206/id_test.go#L116
-    #[test]
-    fn test_from_str_valid() {
-        assert_eq!(
-            Id::from_str("9m4e2mr0ui3e8a215n4g").unwrap(),
-            Id([0x4d, 0x88, 0xe1, 0x5b, 0x60, 0xf4, 0x86, 0xe4, 0x28, 0x41, 0x2d, 0xc9])
-        );
-    }
-
-    #[test]
-    fn test_from_str_invalid_length() {
-        assert_eq!(
-            Id::from_str("9m4e2mr0ui3e8a215n4"),
-            Err(ParseIdError::InvalidLength(19))
-        );
+    fn fixed_binary_text_vectors() {
+        for (raw, text) in &[
+            (
+                [
+                    0x4d, 0x88, 0xe1, 0x5b, 0x60, 0xf4, 0x86, 0xe4, 0x28, 0x41, 0x2d, 0xc9,
+                ],
+                "9m4e2mr0ui3e8a215n4g",
+            ),
+            ([0; RAW_LEN], "00000000000000000000"),
+            ([255; RAW_LEN], "vvvvvvvvvvvvvvvvvvvg"),
+        ] {
+            let id = Id::from_bytes(raw).unwrap();
+            assert_eq!(id.to_string(), *text);
+            assert_eq!(Id::from_str(text).unwrap(), id);
+            assert_eq!(id.as_bytes(), raw);
+        }
     }
 
     #[test]
-    fn test_from_bytes_invalid_length() {
-        assert_eq!(
-            Id::from_bytes([1u8; 19].as_slice()),
-            Err(ParseIdError::InvalidLength(19))
-        );
+    fn malformed_lengths_and_alphabet_are_rejected() {
+        for text in &["", "9m4e2mr0ui3e8a215n4", "9m4e2mr0ui3e8a215n4g0"] {
+            assert_eq!(
+                Id::from_str(text),
+                Err(ParseIdError::InvalidLength(text.len()))
+            );
+        }
+        for length in &[0, 11, 13, 20] {
+            assert_eq!(
+                Id::from_bytes(&vec![0; *length]),
+                Err(ParseIdError::InvalidLength(*length))
+            );
+        }
+        for (text, character) in &[
+            ("9M4e2mr0ui3e8a215n4g", 'M'),
+            ("9w4e2mr0ui3e8a215n4g", 'w'),
+            ("9z4e2mr0ui3e8a215n4g", 'z'),
+            ("9-4e2mr0ui3e8a215n4g", '-'),
+            ("9 4e2mr0ui3e8a215n4g", ' '),
+            ("9\u{0}4e2mr0ui3e8a215n4g", '\0'),
+            ("000000000000000000é", 'é'),
+        ] {
+            assert_eq!(
+                Id::from_str(text),
+                Err(ParseIdError::InvalidCharacter(*character))
+            );
+        }
     }
 
     #[test]
-    fn test_from_str_invalid_char() {
-        assert_eq!(
-            Id::from_str("9z4e2mr0ui3e8a215n4g"),
-            Err(ParseIdError::InvalidCharacter('z'))
-        );
+    fn only_zero_padding_bits_are_canonical() {
+        for &character in ENC {
+            let mut text = *b"00000000000000000000";
+            text[19] = character;
+            let parsed = Id::from_str(str::from_utf8(&text).unwrap());
+            if character == b'0' || character == b'g' {
+                let mut raw = [0; RAW_LEN];
+                raw[11] = u8::from(character == b'g');
+                let id = parsed.unwrap();
+                assert_eq!(id.as_bytes(), &raw);
+                assert_eq!(id.to_string().as_bytes(), &text);
+            } else {
+                assert_eq!(
+                    parsed,
+                    Err(ParseIdError::InvalidCharacter(char::from(character)))
+                );
+            }
+        }
+    }
 
-        assert_eq!(
-            Id::from_str("00000000000000jarvis"),
-            Err(ParseIdError::InvalidCharacter('s'))
-        );
+    fn bitwise_encoding(raw: &[u8; RAW_LEN]) -> String {
+        // Independent, deliberately simple oracle for the unrolled codec.
+        (0..ENCODED_LEN)
+            .map(|group| {
+                let mut value = 0_u8;
+                for offset in 0..5 {
+                    let bit = group * 5 + offset;
+                    value <<= 1;
+                    if bit < RAW_LEN * 8 {
+                        value |= (raw[bit / 8] >> (7 - bit % 8)) & 1;
+                    }
+                }
+                char::from(ENC[usize::from(value)])
+            })
+            .collect()
+    }
 
-        assert!(Id::from_str("00000000000000jarvig").is_ok());
-        assert!(!Id::from_str("00000000000000jarvig").unwrap().is_zero());
+    #[test]
+    fn codec_matches_bitwise_encoding_at_every_bit_boundary() {
+        let mut previous = Id([0; RAW_LEN]);
+        for bit in (0..RAW_LEN * 8).rev() {
+            let mut raw = [0; RAW_LEN];
+            raw[bit / 8] = 1 << (7 - bit % 8);
+            let id = Id(raw);
+            let text = bitwise_encoding(&raw);
+            assert_eq!(id.to_string(), text);
+            assert_eq!(Id::from_str(&text).unwrap(), id);
+            assert!(previous < id);
+            assert!(previous.to_string() < text);
+            previous = id;
+        }
+        for byte in 0..=u8::MAX {
+            let raw = [byte; RAW_LEN];
+            let text = bitwise_encoding(&raw);
+            assert_eq!(Id(raw).to_string(), text);
+            assert_eq!(Id::from_str(&text).unwrap().as_bytes(), &raw);
+        }
     }
 
     // https://github.com/rs/xid/blob/efa678f304ab65d6d57eedcb086798381ae22206/id_test.go#L45
@@ -268,6 +327,13 @@ mod tests {
                 pid: 0xddee,
                 counter: 1,
             },
+            IDParts {
+                raw: [255; RAW_LEN],
+                timestamp: u64::from(u32::MAX),
+                machine_id: [255; 3],
+                pid: u16::MAX,
+                counter: 0x00FF_FFFF,
+            },
         ];
 
         for t in tests {
@@ -288,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_default() {
-        let id: Id = Default::default();
+        let id = Id::default();
         assert!(id.is_zero());
         assert_eq!("00000000000000000000", id.to_string().as_str());
         assert_eq!(Id::from_str("00000000000000000000").unwrap(), id);

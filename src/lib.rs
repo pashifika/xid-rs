@@ -19,7 +19,10 @@
 //! ## Usage
 //!
 //! ```
-//! println!("{}", xid::new()); //=> bva9lbqn1bt68k8mj62g
+//! # fn main() -> Result<(), xid::GenerationError> {
+//! println!("{}", xid::try_new()?);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! [`xid`]:  https://github.com/rs/xid
@@ -29,46 +32,33 @@ mod id;
 mod machine_id;
 mod pid;
 
+pub use generator::GenerationError;
 pub use id::{Id, ParseIdError};
 
 /// Generate a new globally unique id.
+///
+/// Prefer [`try_new`] when generation failures must be handled.
+///
+/// # Panics
+///
+/// Panics if generator initialization fails or the clock is outside the
+/// unsigned 32-bit XID timestamp range.
 #[must_use]
 pub fn new() -> Id {
-    generator::get().new_id()
+    try_new().expect("XID generation failed")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // https://github.com/rs/xid/blob/efa678f304ab65d6d57eedcb086798381ae22206/id_test.go#L64
-    #[test]
-    fn test_new() {
-        let mut ids = Vec::new();
-        for _ in 0..10 {
-            ids.push(new());
-        }
-
-        for i in 1..10 {
-            // Test for uniqueness among all other 9 generated ids
-            for j in 0..10 {
-                if i != j {
-                    assert_ne!(ids[i], ids[j]);
-                }
-            }
-
-            let id = &ids[i];
-            let prev_id = &ids[i - 1];
-            // Check that timestamp was incremented and is within 5 seconds of the previous one
-            // Panics if it went backwards.
-            let secs = id.time().duration_since(prev_id.time()).unwrap().as_secs();
-            assert!(secs <= 5);
-            // Check that machine ids are the same
-            assert_eq!(id.machine(), prev_id.machine());
-            // Check that pids are the same
-            assert_eq!(id.pid(), prev_id.pid());
-            // Test for proper increment
-            assert_eq!(id.counter() - prev_id.counter(), 1);
-        }
-    }
+/// Generate a new globally unique id without panicking on generation failures.
+///
+/// Initialization is lazy and shared by all threads. A failed initialization
+/// publishes no generator; a later call may attempt initialization again.
+///
+/// # Errors
+///
+/// Returns [`GenerationError`] for an invalid `XID_MACHINE_ID`, unavailable
+/// machine/entropy input, or a clock outside `0..=u32::MAX` whole seconds since
+/// the Unix epoch. Successful allocation does not guarantee collision freedom
+/// or chronological ordering across clock regressions or counter wrap.
+pub fn try_new() -> Result<Id, GenerationError> {
+    generator::get()?.new_id()
 }

@@ -6,42 +6,32 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-20.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-      - uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-      - name: cargo check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
-      - name: cargo test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-      - name: cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: -- -D warnings
-      - name: cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Check
+        run: cargo +1.98.1 check --all-targets
+      - name: Test
+        run: cargo +1.98.1 test --all-targets
+      - name: Documentation tests
+        run: cargo +1.98.1 test --doc
+      - name: Allocation smoke
+        run: cargo +1.98.1 run --example gen
+      - name: Clippy
+        run: cargo +1.98.1 clippy --all-targets -- -D warnings
+      - name: Format
+        run: cargo +1.98.1 fmt --all -- --check
