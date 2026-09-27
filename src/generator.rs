@@ -124,7 +124,7 @@ mod tests {
     fn invalid_timestamps_do_not_consume_a_counter() {
         let generator = generator(7);
         assert!(matches!(
-            generator.with_time(&(UNIX_EPOCH - Duration::from_nanos(1))),
+            generator.with_time(&(UNIX_EPOCH - Duration::from_secs(1))),
             Err(GenerationError::BeforeUnixEpoch)
         ));
         let overflow = u64::from(u32::MAX) + 1;
